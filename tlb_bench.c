@@ -16,6 +16,7 @@
 #include <time.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <stddef.h>      /* ptrdiff_t */
 
 #define HUGE_2MB (2UL * 1024 * 1024)
 #define STRIDE   4096                   // 每次条一个4KB页，最大化TLB压力
@@ -47,6 +48,15 @@ alloc_mem(size_t size,int huge){
         
         return NULL;
     }
+
+#ifdef MADV_NOHUGEPAGE
+    /* ★ 对照组显式拒绝透明大页(THP)。
+     * THP=always 的机器上，这块匿名映射会被内核自动提升成 2MB 大页，
+     * 于是"4KB 组"其实也是大页 → 两组都是大页 → 加速比≈1。
+     * 本机 THP=madvise，这行是防御性的：换台机器跑也能保证对照组纯净。 */
+    if (!huge)
+        madvise(p, size, MADV_NOHUGEPAGE);
+#endif
 
     memset(p,0,size);
     return p;
@@ -140,6 +150,40 @@ run_chase(void *start, size_t iters){
     return (t1 - t0) * 1e9 / (double)iters;
 }
 
+/* ★ 自检：证明指针环真的随机、且覆盖全部槽位。
+ * 抓两类会让整个实验失效、但不会报错的错误：
+ *   ① 置换退化（洗牌写错 → 恒定步长 → 预取器生效 → 加速比≈1）
+ *   ② 链断成多个小环（工作集缩水 → TLB 压力归零） */
+static int
+verify_chain(void *start, size_t n)
+{
+    /* 走 n 步必须回到起点 —— 单环且覆盖全部槽位 */
+    void *q = start;
+    for (size_t k = 0; k < n; k++)
+        q = *(void **)q;
+    if (q != start) {
+        fprintf(stderr, "  \u2717 自检失败: 走 %zu 步没回到起点，链不是单环\n", n);
+        return 0;
+    }
+
+    /* 前 16 步的步长不能恒定 —— 恒定说明置换退化成了轮转 */
+    q = start;
+    ptrdiff_t d0 = (char *)*(void **)q - (char *)q;
+    int constant = 1;
+    for (int k = 0; k < 16 && constant; k++) {
+        void *nx = *(void **)q;
+        if ((char *)nx - (char *)q != d0) constant = 0;
+        q = nx;
+    }
+    if (constant) {
+        fprintf(stderr, "  \u2717 自检失败: 前16步步长恒定(%td)，置换失效，预取器会生效\n", d0);
+        return 0;
+    }
+
+    printf("  自检: 单环覆盖 %zu 槽位 OK, 步长随机 OK\n", n);
+    return 1;
+}
+
 static void
 bench_one(const char* label,size_t size,int huge,double* out_ns){
     
@@ -156,6 +200,11 @@ bench_one(const char* label,size_t size,int huge,double* out_ns){
         size >> 20,n,huge ? size / HUGE_2MB : size / 4096);
     
     void* start = build_chain(mem,size);
+    if (!verify_chain(start, n)) {          /* ★ 自检不过就别测了，数字没意义 */
+        munmap(mem, size);
+        *out_ns = -1.0;
+        return;
+    }
     double ns = run_chase(start,20UL * 1000 * 1000);
 
     printf(" 平均时延: %.2f ns/access\n",ns);
@@ -176,9 +225,12 @@ int main(int argc,char** argv){
 	       size / 4096, size / HUGE_2MB);
 	printf("(典型 L2 TLB 约 1536 项，据此判断哪种会大量 miss)\n");
 
+    /* 第二个参数: 0=只测4KB, 1=只测大页, 缺省=两个都测。给 perf 分开计数用 */
+    int mode = (argc > 2) ? atoi(argv[2]) : -1;
+
     double ns_normal = 0,ns_huge = 0;
-    bench_one("普通4KB页",size,0,&ns_normal);
-    bench_one("2MB 大页",size,1,&ns_huge);
+    if (mode != 1) bench_one("普通4KB页",size,0,&ns_normal);
+    if (mode != 0) bench_one("2MB 大页",size,1,&ns_huge);
 
 	if (ns_normal > 0 && ns_huge > 0) {
 		printf("\n=== 结果 ===\n");

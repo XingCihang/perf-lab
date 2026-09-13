@@ -50,7 +50,7 @@ alloc_mem(size_t size,int huge){
     }
 
 #ifdef MADV_NOHUGEPAGE
-    /* ★ 对照组显式拒绝透明大页(THP)。
+    /* 对照组显式拒绝透明大页(THP)。
      * THP=always 的机器上，这块匿名映射会被内核自动提升成 2MB 大页，
      * 于是"4KB 组"其实也是大页 → 两组都是大页 → 加速比≈1。
      * 本机 THP=madvise，这行是防御性的：换台机器跑也能保证对照组纯净。 */
@@ -150,7 +150,7 @@ run_chase(void *start, size_t iters){
     return (t1 - t0) * 1e9 / (double)iters;
 }
 
-/* ★ 自检：证明指针环真的随机、且覆盖全部槽位。
+/* 自检：证明指针环真的随机、且覆盖全部槽位。
  * 抓两类会让整个实验失效、但不会报错的错误：
  *   ① 置换退化（洗牌写错 → 恒定步长 → 预取器生效 → 加速比≈1）
  *   ② 链断成多个小环（工作集缩水 → TLB 压力归零） */
@@ -200,7 +200,7 @@ bench_one(const char* label,size_t size,int huge,double* out_ns){
         size >> 20,n,huge ? size / HUGE_2MB : size / 4096);
     
     void* start = build_chain(mem,size);
-    if (!verify_chain(start, n)) {          /* ★ 自检不过就别测了，数字没意义 */
+    if (!verify_chain(start, n)) {          /* 自检不过就别测了，数字没意义 */
         munmap(mem, size);
         *out_ns = -1.0;
         return;
